@@ -1,0 +1,393 @@
+Imports receives vehicles data in form of csv, Json, XML from (150-200)
+When we get vehicle data from any particular source we have identifier in data that indicate for which dealer(Inventory owner (storeID, webID)) is data for.
+
+
+2 type of input file :- 
+	dealer file
+	oem file
+
+
+types of sources :-
+	Stocking/Primary (Create or Delete data)
+		Dealer feeds
+		Intransit feeds (oem feeds, probably left and not in the dealers system yet)	
+	Supplemental Feeds (only Update data)
+		Attributes
+		Prices 
+		Photos
+		Certification status
+
+
+(Note! there may data for vehicle in Intransit mode and request came for to stocking it, then update is made)
+
+
+When we have dealer data it has all input have identifier that it belongs to particular owner
+When we receive a particular data we have identifier have mapping that this is the inventory owner and for which vehicle is data for. 
+
+
+if we get a record that is not configured that we are not able to identify that for which inventory owner or vehicle this record for in that case we reject that record. 
+
+
+
+
+
+Import Service:-  (importVehicle, ImportVehicleV2, CSV, Reynolds xml, DMS json)	
+	Consider it as producer or parser that parse messages and input for import Processor service . 
+
+	Import service only understand importVehicle format so any data should be converted to importVehicle data. 
+	(Note! ImportVehicleV2 is used by Toyota) This mainly receive not standard format and passes 
+
+	it to Perl parser and then convert to standard format. On new OEM field Mapping is used.
+	fieldMapping (Just map data from one field to another field). DMS uses fieldMapping at dealer level.	
+	
+	Hystrix is a library that controls the interaction between micro services to provide latency and fault tolerance Produce message to rabbit MQ .
+	
+	Calculate difference for full feed data and publish delete message .
+	When ever we receive data from CSV we need full feed so what ever data in field we need that 
+
+	data database to have rest of data is deleted .
+	Fullfeed decertification, program Approved .
+
+	
+
+
+
+Import Processor Service:- 
+	Import work for each message. if 100 vehicle are there are 100 message. It takes parsed message and import vehicle into system . It the one who is responsible for importing vehicle into system . Import processor service is actual import data processing. It posted on 4 nodes and fetch messages from rabbitMQ and prefect count is 800 . it is expected to processor 3200 . 
+	
+	validator:- is simple validation check (stock no, vin, production no.) other we will not proceed source 
+	
+	filtering:- is some thing import have rule engine where we can specify only certain type of request to proceed . every vehicle is processed passed through that filter  to check whether it is valid or not . certain rules are made .
+	
+	BuildDataActor:- build data while we are importing data build data is usually used by detailer to accurately determine some parameters that we receive from OEM so import will hit detailer and detailer will inter check with build data about what need to be augmented for vehicle at this step would be importing build data if we have receive build data for particular source. (Only GMCC is providing build data not all sources provide build data) Build data is details when vehicle is build (year, model, color, vin, doors etc. ) for only new vehicles.	
+
+	
+	LookupActor:- At this step decide what operations to be performed (CREATE, UPDATE, DELETE, TRANSFER). look up CVS if this particular vehicle exist or not for this particular inventory owner . Transfer happens for only for DMS if vehicle exist for enterprise company1 if receive DMS request that this vehicle is for enterprise company2.
+	
+	MarketablelookupActor:- flag in CVS which  tell is this vehicle is marketable or not it . if that flag is false CVS will not return that vehicle until or unless specific query in CVS if this vehicle is marketable or not. it will take that vehicle, import that vehicle  and will not validate it out until or unless query is given if this vehicle is marketable or not. we can specify that when we import data from dealer for this and this source vAuto marketable as false. import that data will put in CVS but not validate specifically. (by default it is true). 
+	
+	VehicleDuplicateValidator:- we receive multiple 800 request for particular node. at a given time if queue is full there are 800 lost message at at that node .
+	
+	VehicleConverActor:- convent ImportVehicle to Detailer Input.
+	
+	DetilerBuncer:-       batch size- 75     time- 600ms	 .
+
+	DetailerActor:- Import work for each message. if 100 vehicle are there are 100 message. for 100 message we don't hit detailer 100 time that would decrease performance . we bunch detailers all message coming in at this particular time we bunch this messages together. if any of the above threshold reached we released the detailer . If we send 75 messages and receive 40 messages then again these messages are broken down . A key of inventory owner is used while bunching . if we bunch 2 same key we are unable to break it down . because for the same key there exist two message in that case we send one one message back to queue come later and while doing these we make entry in map for the first key if same key came again we saw it is in system but where we don't know . After finish task we remove that key from the map if before remove key that message come again then again we send it back to the queue.
+	
+	MandatoryfieldValidator:- detailer would augments lots of field with vehicle ones the detailing is one we have actual set of data (model should be present, year should be present etc. ).
+	
+	AccessioriesLookupActor:- accessories should be present.	
+	
+	AccessioriesPersistorActor:- 	
+
+	EnterpriseCompanyFetchActor:- When we import vehicle we import it for the store (webId, storeId) CVS don't understand StoreId it understand actual owner (Enterprise Company) . Till now we don't enterprise id we just have store id . rule or filter applied. what this particular vehicle what is enterprise id is. It is one to one mapping if there are multiple enterprise for store then for this vehicle what is enterprise id . this web id has these may store and this store have these many enterprises.
+	
+	StockTypePopuatorActor:-  To check if vehicle is demo or not
+	
+	FielLengthTrimmingActor:- trimming of few fields.
+	
+	ModifiedFieldsExtractorActor:- (Difference between dealer output and ReadApi vehicle) for update by update we mean if vehicle is present in CVS or not . there might be change or not in data . At This point if there is change then we check if the source are allowed to do that change or not .	
+
+	CategoryLockingActor:- if there is something to updated.
+	
+	CVSRequestBuncher:-  batch size- 25   time- 700ms
+	
+	CVSRouterActor:- route operation type (create update delete)
+	
+	DeleteVehicleActor:- what is to be deleted sent to this.
+	
+	CVSpersistorActor:- what is to be created.
+	
+	cvsStatusUpdateActor:- in this update what ever happened to this vehicle in elastic search .
+	
+	FinisherActor:-  In finisher Actor tell what happen to this particular message. 	
+	
+	StatisticsUpdateActor:- each message know for which batch it is for . then it check Cassandra how many messages have been processed for that batch for that particular inventory owner . but it needs to know total count how many messages were received for that batch. there is index in elastic search for total count . we check against that count if it is true it says batch is complete and it trigger process .		
+
+	Circuit Breaker:- All transactions are logged in Cassandra, PostgreSQL, S3 and elastic search. 
+	if we hit two service CVS and detailers if any service give timeout error . We are 4 node of service data if time out error came then that particular node open timeout error . it stop processing for 2 minutes inheritance from top level actor we check in top level actor if circuit breaker open or not, if open then we send all messages to the queue (800 messages).  if there is some severe problem then all 4 nodes send message back to queue . in this case we detach listener from queue as are there 800 messages in queue . and after 2 min it will send one message to severe and if it get response in oscillated time and it will attach listener back to queue and close the circuit . 
+
+
+
+
+
+
+Import Photo processor(use Import platform):- previously this is done using invperl
+	After import service is completed it will publish a message to queue to which Import Photo processor is listening . It is similar architecture like ImportServiceProcess . The code is written is tightly coupled . In this tasks are running asynchronously . Main idea is write a code like spring batch . In this we tell what to start with after that there is next which after finishing this task where you have go next or which next you have to perform .
+
+	There is pool of thread . thread is allocated to task(as per requirement) after perform that particular task it will release that thread Thread will not perform whole job it will just that particular task. Each Actor is having an inbox after performing that particular task it will drop message in next Actor inbox. Or we can say there is blocking queue .
+
+
+	We we recieve number of urls for a particular, first get the existing photos from db . lets say we get 10 photos urls then we check number of photos match or not . if they don't then there is diff then we have to process all the photos one by one if that the case then we have the download each photo and upload to MSS while uploading we create a photo id once that done then we attach that with VIN . we get photo update and put a datestamp dealer want us to update or not then we have to reprocess all the images . If we 10 photos in system and dealer send us 10 photo they might be updated photo here and there if they speficiy that flag 'Y' and we update photo in db . same the case with datestamp . some times dealer rearrange the photo and photo are same there is field in invetory that allow us to rearrange order . 
+
+	In NIS new inport service after completing data processing for vehicle, import consumer publish a photo message for respective vehicle in a queue whicha are consumed by new photo processing soltion for update of all photos of particular vehicle in inventory . process onr vin at time end to end .
+
+	In elastic search it is stored how many photo are downloaded or updated but don't for particular vin just count and date are stored in CVS . 
+
+	We are processing physical photos in invperl but now we only process photos urls . 
+
+Scheduler:- All sources are OEM sources we can specify that this data is for particular family		Nissan, GM etc.
+
+
+Inventory-Import -> Importjobexecutor
+
+
+
+
+
+Import Photo Processings:- Until now all photos processing had always been handled via Perl photo processing solution on batch machines . these photos and data are processing on separate	machines. But now we are using new import photo processing that uses java and run on OPB machines.
+
+Advantages of using new import photo processing solution.	
+ 	
+ 	New solution can utilize hardware more efficiently:- new import photo solution is running on 4 OPB machines rather than 10 batch machines. A lot of time batch machine sit idle waiting fir source to feed to come in before kicking off photos but OPB machines are will be utilized for any source that come through with photos. A batch machine require 50GB of hard disk space to physical download the photos from whole batch onto machine but new solution keeps the photos between download and upload steps.
+	
+	New import is uses latest tech stack it will be more maintainable, robust, scalable, time and space efficient:-Written in java rather than Perl as more people are familiar with java can easily integrate new feature as required. Akka framework allow for granular concurrency management at each step of photo processing which improve the total processing time. Deployed as dockerized OPB services (capable of spinning more instance for increase processing power and space while minimizing space utilization).   In batch machine if one batch machine goes down none of them none of them is feed but in New Import photo      processing solution if one machine goes down then others are still able to process photos.
+
+	New solution brings real time updates for photos:- move more sources from batch processing to real time. Easily start new client on real time. Specify the procedure for how to process or handle real time request that also contains photos request.
+
+
+	New solution does not require the work-around of creating a separate source from the same source in order to restrict photos from processing from a provider when only the data should process:- With Perl solution there has always been only limited control over which sources will process photos for dealer . Its difficult to prevent photos from processing for same vehicle from unwanted sources. This is because if the source is configured as a data provider for that dealer then Perl will automatically allow photos to process by default . Perl will not check whether the source is configured as photo provider in photos category in import config Perl only check the whether the source is configured by the dealer at all by checking the inventory_source table and if it configured then it will allow photos to process We have utilized a technique that a separate source name need to also be configured in inventory_source table to allow photos from that original source source feed to process.
+
+
+	New solution solve this problem by honoring when a source is configured for a dealer in the photos category of import config . There is no need to creating sperate source for creating/restricting photo processing . New photo procesor will allow photo processing to take place from a given source only if source is configured in the photos category for the given dealer . This also means that new solution will solution will honor the New/ Used/ Certified columns of import from source and process photos for new and certified vehicle from sourceB . However we still don't support for category looking or category ownership of the photos category . 
+
+
+The data and photos are now together processed and put in RabbitMq queue and expose data to import consumer (import processor service) upon successful completion if data is having photos and storage is allow to process photos it will publish message in photo RabbitMq and import photo service pick it from photo RabbitMq and update photo in CVS .
+
+	
+
+
+
+How photo processing happens 
+	Photo message validation:- it validate whether photo contains dealer name, vin all fields require.
+	
+	Fetch existing vehicle photos:- fetch existing photos of vehicle .
+	
+	Url Validation & Message pre processing:- Validation on actual urls and populating some fields  to determine photo diff. Which photos are candidate for download:- compare photo message and all photos that we are having to determine if there are any photo changes .	
+	
+	Filter Download candidates (Head Request):- before downloading photo determine do we actually need to download these photos so we make some head request against all those urls and look  last modified date on actual resource to determine if there is change on that basis we decide do we have download the photos or not . we have lost to photos that need to be download .
+ 
+ 	Download or upload:- In this phase we initiate download photo request . during upload the we create photo id for entry in database and that photo id attach to vehicle that this photo belongs to this particular vehicle.
+ 	
+ 	Associate existing vehicle photos with Incoming photos that were not downloaded(Rearrange photos):- Vehicle is having original photos associating with them we want to get original photos we fetch those photos which were already fetch in 2nd step.
+ 
+
+	Persist photo changes:- makes changes in db.
+	
+	(Note! we don't replicate cache among nodes. if cache image is present in one node and in another node we are processing same image and it is not present in that node cache then we have to download it again.)
+
+
+
+Detailed view of Import Photo Service
+	1. Consume photo message from queue 	
+	
+	2. Validate photo message:- check if all detail associated with it or not like vin, dealer id etc.	
+	
+	3. Terminate if photo message is not most recent message for vehicle:- if we get message for vehicle and is not most recent message for that vehicle then we discard that message . 
+	
+	4. Fetch existing photos for vehicle (referred ad vehiclePhotos)	
+	
+	5. Fetch original photos for any vehicle which are overlay photos. 	
+	
+	6. Terminate if vehiclePhotos has been updated by lot Merchants. 	
+	
+	7. if should delete all photos from vehicle and (we have to provide flag to swipe out all photos) jumps to step 23. 	
+	
+	8. Validate photo urls
+	
+	9. Modify photos ulrs if applicable
+	
+	10. Determine domain from photo url:- try to determine domain from photos , photo message contains photos so right now we just determine domain from just first photo.	
+	
+	11. Populate photo id/url and and set photo ranking of incoming photos (referred to as feed Photos)	
+	
+	12. Populate feed Photos description from photo message data :- description photo id, who is dealer etc.	
+	
+	13. If force photo update  
+		a. Populate batch force photo flag on photo message . if applicable 
+		b. Mark all feed Photos as download required and set remote last modified date on all feedPhotos to null
+		c. Then jump to step 21	
+	
+	14. If all feed photos urls are new on the vehicle 	
+		a. Mark all feedPhotos as download required and set remote last modified data on all feedPhotos to null
+		b. then jump to step 21 	
+	
+	15. Indicates whether download is required for any feedPhoto Mark all photos as candidates for download if:
+		photosUpdated flag is true
+		Or
+		photosUpdated flag is null/ missing and photos date stamp is null/missing
+	Mark individual feed photos as candidates for download 
+		if feedPhoto url is new 
+		or 
+		feedPhoto date Stamp is newer than date stamp of last time we persisted any given url on the corresponding existing 
+	When photosUpdated flag is false or feedPhotos dateStamp is older than persistence date of all existing vehiclePhotos:
+		only photos which include new urls will be marked as candidate for downloading all others will be skipped
+	
+	16. if there is no feedPhotos marked for download  jump to step 20.a
+
+	17. Perform HEAD request on feedPhotos urls Only make HEAD request on each feedPhoto marked for download and if url is already exist on vehicle in vehiclePhotos
+		If last modified header is older than date of last time we persisted that url on the corresponding existing vehiclePhotos, remove download required flag from any feedPhotos.	
+		If Head request fails or does nor include last-modified head, photo marked for download as we still do not know if it changed.	
+	
+	18. Lookup feedPhotos url in photoUrl cache
+		Only need to lookup url of feedPhotos still marked for download .
+		If any feedPhoto url is cache then that means url has been recently downloaded already . So, remove download required flag and attach photo ID on respective feedPhotos and mark operation type as modify in photo message
+		
+		19. Populate last modified date in feedPhotos
+			Only set last modified date on each feedPhoto still marked for download and if url already exists on vehicle vehcilePhotos  . 
+			Set feedPhotos last modified date to the date of the last time we persisted than url on the corresponding existing vehiclePhotos . 
+		
+		20. If there are no longer any feedPhotos are marked for download 
+			a. If the sequence to total count of feedPhotos is different than existing vehiclePhotos or if operation type is set to Modify on photo message then jump to step 22
+			b. Else 
+			Terminate the photos process for the photo message as there are no changes to the photos 	
+
+		21. Perform photos download and upload 
+			Download each feedPhoto marked for download .
+ 			Upload each downloaded photo to MSS .
+ 			Attach photo ID on feedPhoto
+			If there are any failure, Photo ID will not be attached to any feedPhoto that failed
+		
+		22. Attach photo Id from each existing into each corresponding non-downloaded feedPhoto
+			Any feedPhoto that was not download (either because of no change or failure ) will get assigned same photo Id as what is already assigned to the corresponding existing vehiclePhoto.
+			Handles change in photo sequence.
+ 			If the original photo of an overlay photo did not get re-downloaded or the sequence of the original photo did not charge, photo Id that get attached will be the photo Id of the corresponding existing overlay photo.
+ 		
+ 		23. Persist all feedPhotos and update photo statistics
+ 			Delete all existing photos on vehicle and then persist all feedPhotos containing photo Id by order of rank
+			If there are zero photo on the vehicle, all will be deleted and more will be added inserted 	
+			Currently persistence goes directly to Oracle database, but will be changed later to call CVS for persistence, NIS 
+			Photo statics are persisted to ES(Elastic search)
+
+
+
+
+
+Publishing Photo Messages to Multiple Queues:-
+There are currently 20 separate RabbitMQ queues for holding batch photo messages, and one queue for real time messages. The import-photo-processor instances are configured to listen to all of these queues for consuming messages. When import-processor-service publishes any batch photo message, it puts all messages from the same batch into the same RabbitMQ photo queue. The first message from the batch will decide which queue currently has the least number of messages, and then that message and all remaining messages from the same batch will go to that same queue. When a different batch comes through, it will again find the next smallest queue and do the same thing.
+
+
+
+Domain-Based Threading:-
+Similar to Publishing Photo Messages to Multiple Queues, we don't want any given feed to block the HEAD requests or download/upload steps by filling all of the HEAD Request or Download/Upload actor mailboxes. This is only a concern for those particular actors because those are our bottleneck stages of the application . 
+Solution
+We accomplish what we refer to as "domain-based threading" by creating a custom Akka router which controls how many of the same destination actor mailboxes to fill with messages from a particular source + domain combination.
+This gives two advantages:
+1) We allow other messages with different source + domain combinations to be routed to their own set of mailboxes, preventing one feed from blocking another
+2) We can control via a configuration how many mailboxes to fill for a given source + domain, at each actor stage, to help regulate the maximum number of concurrent requests that can be made against a domain from a given source
+(Note! refers Capture3)
+
+
+
+Domain-Based Retry & Circuit Breaking:-
+The resilience4j library provides the support for this by handling retries and circuit breaking during the HEAD request, download, and upload stages, based on domain. We use a unique circuit breaker instance for each unique url domain that we are invoking the requests against. There is a circuit breaker registry bean defined in the app configuration which is responsible for dynamically maintaining all of the domain-specific circuit breaker instances . We classify the failure as either a Retryable or NonRetryable exception. NonRetryable is generally any 400 series http status code, and Retryable are all other errors which should be able to be recovered from on subsequent attempts.
+
+Thus, the retry config indicates to issue a retry after 2 seconds whenever Retryable exception is thrown, up to 3 max attempts, and will ignore (not retry) any NonRetryable exceptions. If all three attempts are exhausted and it is still throwing Retryable exceptions, the exception will be propagated up to the encompassing circuit breaker function. The circuit breaker function will also ignore NonRetryable exceptions, but Retryable exceptions will issue the circuit breaker instance to increment the error counter. If the error counter reaches a 50% error threshold within a count-based sliding window of 10 attempts (these 10 "attempts" seen by the circuit breaker may actually include at most 30 http requests after considering the nested retries), then the circuit breaker is opened for 30 seconds and all incoming requests for same domain will fail due to the open circuit breaker. Messages failing for this reason will be requeued back to RabbitMQ for 2 minutes, but only if the given message has not already exceeded its maximum requeue limit. Batch messages will only be requeued once, but realtime messages can be requeued up to 5 times.
+
+
+
+Primary:- use to process photos + data 
+Supplemental:- used for supplemenatal data(only update data)
+
+
+
+Invperl previously we had script in invperl where we could a primary , suplemental or differiantial fiel file . This is replaced by New Import Solution now we are only processing priary and supplemenatal . so we left with parsing part . when we get new feed file the import job execute import service and process it and send it to import process service . In parsing process we call perl script and pass source name and feed file parameter like spilt photo  etc to split file into multiple feed file. example if have 10 file after spilting we end up  with 20 files.  
+one for data processing and one for photo processing . First of all if fetch import directory like webAuto, bin, data, logs, archieve etc under web auto import when new job is trigered . Unzip it if it normal file just start using it . then start the parsing processing once parsing is done it provide 2 file one is data and other id photo it provides in standard cobalt standard format with space seprated files (header + records)
+
+Parser are customs + default . files comes in different format standard, zip, .bat, tab seprated, xml file and each one have seprate header . if file is comma or space seprator we use default format . 
+
+
+
+
+Inventory Exports:- how we are getting from different sources we export data to different sources (different format) . We have inventory Export Syndication we make calls in CVS, MVS, Dealer Services make calls and get data files expose to vendors (7000-8000). 
+1. Export Job Configuration:- 
+    Export Creation for the Vendor
+        Go to export job Ui
+        Clone a job for the vendor 
+        follow the instruction to choose the new job key
+        clone the job
+        Once the clone process is done the newly created export job should show up int the job key dropdown.
+ 
+    Export Configuration
+		Once the export job is created for the vendor you may configure the job accordingly by Going to export Job UI
+		Modify the configuration data. See Action Modify -> Configuration Data section in Documentation of Export of Export Job UI for details Configuration each parameters on the configuration data page. See the expiration and details of each fields on the section .
+
+   The Configuration of Report File Name
+		Next you need to configure the name of the report for the vendor. 
+        Go to export Job UI 
+		Configure the name of report. See details in Action Modify -> Report File Names in Documentation of Export Job UI
+	
+	Report Data Configuration   
+ 		Next you need to configure the report at format for the vendor 
+		Got to Export Job UI
+		Configure the report data format. See details in Action Modify -> Report Configuration in Document of Export Job UI
+
+
+    Adding Dealers to Export 
+        two ways 
+        1. using export manager Ui
+        2. using Export job Ui
+
+    Export Job Scheduling(time is in UTC) six time a day
+        the schedule of each job can be configured based in vendors requiremnet. Some vedors prefer to get the data once a day other few time a day.
+
+   Checking job status
+        Schedule job will be picked by job daemon process Once the job finished the job status will be upload.
+
+    Executing the Job Once
+        You may need to run job Once the job is configured or sometimes you need make an additional execution of the job . to do so go to  Export job Ui -> Action View -> Schedule page and click Run Now
+     
+
+2. Export Job Execution
+
+   Inventory Job Scheduling Daemon 
+		It is perl script , It runs in looping fashion every 6 min.
+		We have diff type of jobs first it will execute one time job  
+		Then it will execute periodic job6 time a day . 
+		Then it will execute individuals job.  
+	
+	Export Job Execution
+ 		for each job we have job daemon 
+		Get the export configuration for this job
+		For each dealer get necessary dealer info 
+		Based on report configuration on Export Job UI-> Action Modify -> Report Configuration page write data in the specified format to data files          Transfer the data files based on protocol being configured like FTP, SMTP< LOCAL etc.
+		Log the history and status of the job 
+		Send the alert if configured 
+		Send out error alert if there is any error at the retries fail   
+	
+	This export job is Crontab
+ 		swapped by crontab Export Job in Crontab 
+
+
+3. Other Export Processes
+   Besides export job execution there are a few process related to export like syncing dealers, export job monitoring and error monitoring etc.
+
+   Syncing Dealers of Export Jobs
+        There is a process running once a day at the background to sync the dealer for the export job which will auto sync dealer . Then it will pick new dealer and delete depreciated dealers
+    
+   Export Job Monitoring 
+        single script in run for both regular and critical exports 
+        Regular export Monitor runs twice day and check it there is job without completion in last 12 hours if ot detect error it will schedule job again
+        Critical export Monitor only for critical exports and we have to send parameter critical=Y and it runs every 30 min if job terminated abnormal then it will kick off the job and send alert to dev team.
+
+    Export History
+        Old export history logs are cleaned once a day by script
+        Currently we retain 90 day export history logs
+
+   Export Error Monitor
+        This is process monitor the error in export log files runs in background with parameter type=export
+        if error are more than 4000 it will send an alert to dev team.
+
+4. Export Manager
+	Export Manager    
+		Manage Export 
+ 		to add or monitor dealers    
+	
+	Dashboard 
+ 		looking for jobs done or jobs going on status for jobs and job details page
+	
+	Job Details 
+ 		show job details    
+	
+	Report       
+		Export report history (when issue happen and when issue fixed)
