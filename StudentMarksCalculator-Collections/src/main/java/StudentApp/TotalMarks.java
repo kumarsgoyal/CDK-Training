@@ -6,9 +6,9 @@ public class TotalMarks {
     private StudentValidator studentValidator;
     private MarkValidator markValidator;
 
-    public TotalMarks() {
-        studentValidator = new StudentValidator();
-        markValidator = new MarkValidator();
+    public TotalMarks(StudentValidator studentValidator, MarkValidator markValidator) {
+        this.studentValidator = studentValidator;
+        this.markValidator = markValidator;
     }
 
     public boolean isValidStudent(Student student) {

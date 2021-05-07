@@ -25,7 +25,7 @@ public class Main {
         marks2.add(new Mark("Maths", 98));
         Student student2 = new Student("Sahil", 2, marks2);
 
-        TotalMarks totalMarks = new TotalMarks();
+        TotalMarks totalMarks = new TotalMarks(new StudentValidator(), new MarkValidator());
         System.out.println(totalMarks.getTotalMarks(student1));
         System.out.println(totalMarks.getTotalMarks(student2));
     }
